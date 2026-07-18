@@ -1,0 +1,162 @@
+// E-OS Guard — Crimson-themed file integrity monitor (Slint, software renderer).
+// Palette: deep black #0c0202, panel #160404, blood red #e50914,
+// ok #3a8f3a, warn #d0902a, text #f2e9e9, muted #8a6f6f.
+
+import { ListView, LineEdit, Button } from "std-widgets.slint";
+
+export struct Finding {
+    path: string,
+    status: string,
+    detail: string,
+    // 0 OK, 1 NEW, 2 MODIFIED, 3 REMOVED, 4 WARN
+    kind: int,
+}
+
+export component MainWindow inherits Window {
+    title: "E-OS Guard";
+    background: #0c0202;
+    preferred-width: 920px;
+    preferred-height: 620px;
+
+    in-out property <string> roots;
+    in property <string> status;
+    in property <bool> busy: false;
+    in property <[Finding]> findings;
+    in property <int> n-ok;
+    in property <int> n-new;
+    in property <int> n-modified;
+    in property <int> n-removed;
+    in property <int> n-warn;
+
+    callback baseline();
+    callback scan();
+
+    function badge-color(kind: int) -> color {
+        if (kind == 0) { return #3a8f3a; }       // OK
+        if (kind == 2) { return #e50914; }       // MODIFIED
+        if (kind == 3) { return #b02a6a; }       // REMOVED
+        if (kind == 4) { return #d0902a; }       // WARN
+        return #b06a12;                          // NEW
+    }
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        // ── Roots + actions ──────────────────────────────────────
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: "Katalogi:";
+                color: #f2e9e9;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                placeholder-text: "/usr/bin, /etc";
+                text <=> root.roots;
+            }
+            Button {
+                text: "Ustaw wzorzec";
+                enabled: !root.busy;
+                clicked => { root.baseline(); }
+            }
+            Button {
+                text: "Skanuj";
+                enabled: !root.busy;
+                clicked => { root.scan(); }
+            }
+        }
+
+        // ── Summary chips ────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 8px;
+            height: 28px;
+            for chip in [
+                { t: "OK " + root.n-ok, c: #3a8f3a },
+                { t: "Nowe " + root.n-new, c: #b06a12 },
+                { t: "Zmienione " + root.n-modified, c: #e50914 },
+                { t: "Usunięte " + root.n-removed, c: #b02a6a },
+                { t: "Ostrzeżenia " + root.n-warn, c: #d0902a },
+            ]: Rectangle {
+                background: chip.c.with-alpha(0.22);
+                border-color: chip.c;
+                border-width: 1px;
+                border-radius: 6px;
+                horizontal-stretch: 1;
+                Text {
+                    text: chip.t;
+                    color: #f2e9e9;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Text {
+            text: root.status;
+            color: #8a6f6f;
+            font-size: 11px;
+        }
+
+        // ── Findings ─────────────────────────────────────────────
+        Rectangle {
+            background: #160404;
+            border-radius: 6px;
+            vertical-stretch: 1;
+
+            ListView {
+                for f in root.findings: Rectangle {
+                    height: 44px;
+                    background: transparent;
+                    HorizontalLayout {
+                        padding: 8px;
+                        spacing: 10px;
+                        Rectangle {
+                            width: 96px;
+                            background: badge-color(f.kind).with-alpha(0.25);
+                            border-color: badge-color(f.kind);
+                            border-width: 1px;
+                            border-radius: 4px;
+                            Text {
+                                text: f.status;
+                                color: #f2e9e9;
+                                font-size: 11px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                        VerticalLayout {
+                            Text {
+                                text: f.path;
+                                color: #f2e9e9;
+                                font-size: 13px;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: f.detail;
+                                color: #8a6f6f;
+                                font-size: 10px;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            Text {
+                text: "Skaner integralności — blake3 + SQLite";
+                color: #8a6f6f;
+                font-size: 10px;
+            }
+            Rectangle { }
+            Text {
+                text: "E-OS Crimson";
+                color: #e50914;
+                font-size: 11px;
+            }
+        }
+    }
+}

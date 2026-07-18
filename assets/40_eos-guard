@@ -1,0 +1,6 @@
+name=E-OS Guard
+binary=/usr/bin/eos-guard
+icon=/ui/icons/apps/eos-guard.png
+category=System
+description=Strażnik integralności E-OS (Crimson) — blake3 + SQLite
+author=E-OS

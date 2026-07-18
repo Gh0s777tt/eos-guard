@@ -1,0 +1,34 @@
+[package]
+name = "eos-guard"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "E-OS Guard — Crimson-themed filesystem integrity monitor (blake3 + SQLite)"
+repository = "https://gitlab.com/e-os/eos-guard"
+build = "build.rs"
+
+[[bin]]
+name = "eos-guard"
+path = "src/main.rs"
+
+[dependencies]
+# Portable-Rust blake3 (default-features off drops the C/asm SIMD paths that
+# don't cross-compile cleanly) — the same hash pkgar/the SBOM use.
+blake3 = { version = "1", default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }
+# GUI: Slint widgets + the shared eos-ui Orbital backend.
+slint = { version = "1.17", default-features = false, features = ["compat-1-0", "std", "renderer-software"], optional = true }
+eos-ui = { git = "https://github.com/Gh0s777tt/eos-ui.git", rev = "c53180d40e5b91f15c848c4c39b1a307b14831a1", optional = true }
+
+[features]
+# The GUI is a Redox-target concern; hosts build the CLI/selftest half only
+# (--no-default-features).
+default = ["gui"]
+gui = ["dep:slint", "dep:eos-ui"]
+
+[build-dependencies]
+slint-build = "1.17"
+
+[profile.release]
+# E-OS hardening baseline: any unintended integer overflow aborts.
+overflow-checks = true

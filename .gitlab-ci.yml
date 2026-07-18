@@ -1,0 +1,22 @@
+# E-OS Guard CI — light tier on gitlab.com shared runners.
+# Hosts build the CLI/selftest half only (--no-default-features): the GUI
+# (Slint + eos-ui over orbclient) is a Redox-target concern, cross-built by the
+# meta-repo heavy image job.
+
+stages:
+  - lint
+  - build
+
+fmt:
+  image: "rust:slim"
+  stage: lint
+  script:
+    - rustup component add rustfmt
+    - cargo fmt -- --check
+
+build-host:
+  image: "rust:latest"
+  stage: build
+  script:
+    - cargo build --locked --no-default-features
+    - cargo run --locked --no-default-features -- --selftest

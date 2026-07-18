@@ -1,0 +1,5 @@
+# relibc ships no LFS64 aliases (open64/mmap64/…) — 64-bit off_t is already the
+# default on Redox — so bundled SQLite must use the plain syscalls.
+[env]
+CFLAGS_aarch64_unknown_redox = "-DSQLITE_DISABLE_LFS"
+CFLAGS_x86_64_unknown_redox = "-DSQLITE_DISABLE_LFS"
