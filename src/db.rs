@@ -105,7 +105,9 @@ impl Db {
             .query_row("SELECT COUNT(*) FROM baseline", [], |r| r.get(0))
     }
 
-    /// Replace the whole baseline with a fresh scan.
+    /// Replace the whole baseline with a fresh scan, recording a blake3 digest
+    /// over its canonical (path-sorted) contents so later scans can detect an
+    /// out-of-band edit or corruption of the baseline itself.
     pub fn set_baseline(&mut self, entries: &[Entry]) -> rusqlite::Result<()> {
         let t = now();
         let tx = self.conn.transaction()?;
@@ -119,12 +121,57 @@ impl Db {
                 stmt.execute(params![e.path, e.hash, e.size, e.mode, e.mtime, t])?;
             }
         }
-        tx.execute(
-            "INSERT INTO meta (k, v) VALUES ('baseline_at', ?1)
-             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-            params![t.to_string()],
-        )?;
+        let digest = Self::digest_rows(entries.iter().map(|e| (&e.path, &e.hash, e.size, e.mode)));
+        for (k, v) in [("baseline_at", t.to_string()), ("baseline_digest", digest)] {
+            tx.execute(
+                "INSERT INTO meta (k, v) VALUES (?1, ?2)
+                 ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                params![k, v],
+            )?;
+        }
         tx.commit()
+    }
+
+    /// Canonical blake3 digest over baseline rows (path-sorted), covering the
+    /// path, content hash, size and mode of every entry.
+    fn digest_rows<'a>(rows: impl Iterator<Item = (&'a String, &'a String, i64, u32)>) -> String {
+        let mut lines: Vec<String> = rows
+            .map(|(path, hash, size, mode)| format!("{path}\0{hash}\0{size}\0{mode}"))
+            .collect();
+        lines.sort();
+        let mut hasher = blake3::Hasher::new();
+        for line in &lines {
+            hasher.update(line.as_bytes());
+            hasher.update(b"\n");
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    /// Recompute the baseline digest from the stored rows and compare it to the
+    /// recorded one. `Ok(true)` means intact; `Ok(false)` means the baseline was
+    /// edited/corrupted out of band (or predates digest support).
+    ///
+    /// NOTE: the digest lives in the same database, so this catches corruption
+    /// and naive tampering — not an attacker who also recomputes it. A
+    /// key-signed baseline (the `R-711` class) is future work.
+    pub fn verify_baseline(&self) -> rusqlite::Result<bool> {
+        let stored: Option<String> = self
+            .conn
+            .query_row("SELECT v FROM meta WHERE k = 'baseline_digest'", [], |r| {
+                r.get(0)
+            })
+            .ok();
+        let Some(stored) = stored else {
+            return Ok(true); // no digest recorded (legacy baseline) — don't cry wolf
+        };
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, hash, size, mode FROM baseline")?;
+        let rows: Vec<(String, String, i64, u32)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let actual = Self::digest_rows(rows.iter().map(|(p, h, s, m)| (p, h, *s, *m)));
+        Ok(actual == stored)
     }
 
     fn load_baseline(&self) -> rusqlite::Result<HashMap<String, String>> {
@@ -140,13 +187,26 @@ impl Db {
         let mut sum = Summary::default();
 
         for e in entries {
+            // The permission audit runs on every file, regardless of whether it
+            // changed: a setuid/setgid/world-writable binary is a security fact
+            // worth surfacing even if it's been there all along.
+            let flags = e.security_flags();
+            let flag_note = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" — {} (mode {:o})", flags.join(", "), e.mode & 0o7777)
+            };
+            if !flags.is_empty() {
+                sum.warn += 1;
+            }
+
             match base.remove(&e.path) {
                 None => {
                     sum.new += 1;
                     findings.push(Finding {
                         path: e.path.clone(),
                         status: Status::New,
-                        detail: format!("{} B", e.size),
+                        detail: format!("{} B{}", e.size, flag_note),
                     });
                 }
                 Some(old_hash) if old_hash != e.hash => {
@@ -154,19 +214,18 @@ impl Db {
                     findings.push(Finding {
                         path: e.path.clone(),
                         status: Status::Modified,
-                        detail: "hash zmieniony".into(),
+                        detail: format!("hash zmieniony{flag_note}"),
                     });
                 }
                 Some(_) => {
-                    if e.world_writable {
-                        sum.warn += 1;
+                    if flags.is_empty() {
+                        sum.ok += 1;
+                    } else {
                         findings.push(Finding {
                             path: e.path.clone(),
                             status: Status::Warn,
-                            detail: format!("zapisywalny dla wszystkich (mode {:o})", e.mode),
+                            detail: flags.join(", ") + &format!(" (mode {:o})", e.mode & 0o7777),
                         });
-                    } else {
-                        sum.ok += 1;
                     }
                 }
             }

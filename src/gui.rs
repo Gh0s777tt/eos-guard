@@ -63,12 +63,18 @@ pub fn run() {
 
     let win = MainWindow::new().expect("eos-guard: cannot create the window");
     win.set_roots(SharedString::from("/usr/bin, /etc"));
-    let base_n = app.borrow().db.baseline_count().unwrap_or(0);
-    win.set_status(SharedString::from(if base_n > 0 {
-        format!("Wzorzec: {base_n} plików. Kliknij Skanuj.")
-    } else {
-        "Brak wzorca — kliknij „Ustaw wzorzec”.".to_string()
-    }));
+    {
+        let app = app.borrow();
+        let base_n = app.db.baseline_count().unwrap_or(0);
+        let intact = app.db.verify_baseline().unwrap_or(true);
+        win.set_status(SharedString::from(if base_n == 0 {
+            "Brak wzorca — kliknij „Ustaw wzorzec”.".to_string()
+        } else if !intact {
+            format!("⚠ Wzorzec ({base_n} plików) NARUSZONY — ustaw go ponownie.")
+        } else {
+            format!("Wzorzec: {base_n} plików. Kliknij Skanuj.")
+        }));
+    }
 
     {
         let app = app.clone();
@@ -117,18 +123,24 @@ pub fn run() {
             win.set_status(SharedString::from("Skanowanie…"));
             let (entries, truncated) = scan::scan_roots(&roots, SCAN_BUDGET);
             let app = app.borrow();
+            let intact = app.db.verify_baseline().unwrap_or(true);
             match app.db.diff(&entries) {
                 Ok((findings, sum)) => {
                     let changed = sum.new + sum.modified + sum.removed + sum.warn;
                     show(&win, &findings, sum);
                     win.set_status(SharedString::from(format!(
-                        "Przeskanowano {} plików: {} zmian{}.",
+                        "Przeskanowano {} plików: {} zmian/ostrzeżeń{}.{}",
                         entries.len(),
                         changed,
                         if truncated {
                             " (obcięto do limitu)"
                         } else {
                             ""
+                        },
+                        if intact {
+                            ""
+                        } else {
+                            "  ⚠ WZORZEC NARUSZONY"
                         }
                     )));
                 }

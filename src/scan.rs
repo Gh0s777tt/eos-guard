@@ -13,8 +13,28 @@ pub struct Entry {
     pub size: i64,
     pub mode: u32,
     pub mtime: i64,
-    /// World-writable (`o+w`) — flagged by the security lint.
-    pub world_writable: bool,
+}
+
+impl Entry {
+    /// Security-relevant permission bits, most dangerous first. Empty when the
+    /// file has none. Surfaced by the audit regardless of change status.
+    pub fn security_flags(&self) -> Vec<&'static str> {
+        let mut flags = Vec::new();
+        if self.mode & 0o4000 != 0 {
+            flags.push("setuid");
+        }
+        if self.mode & 0o2000 != 0 {
+            flags.push("setgid");
+        }
+        if self.mode & 0o0002 != 0 {
+            flags.push("zapisywalny dla wszystkich");
+        }
+        flags
+    }
+
+    pub fn has_security_flags(&self) -> bool {
+        self.mode & 0o6002 != 0
+    }
 }
 
 fn blake3_file(path: &Path) -> std::io::Result<String> {
@@ -71,7 +91,6 @@ pub fn walk(root: &Path, out: &mut Vec<Entry>, budget: &mut usize) -> bool {
             size: meta.len() as i64,
             mode,
             mtime,
-            world_writable: mode & 0o002 != 0,
         });
         *budget -= 1;
     }

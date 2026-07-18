@@ -1,21 +1,27 @@
-//! Headless proof of the scan + baseline + diff pipeline, run by
+//! Headless proof of the scan + baseline + diff pipeline (incl. the U-090
+//! permission audit and baseline-integrity digest), run by
 //! `eos-guard --selftest`. Prints `GUARD-SELFTEST-OK` on success (asserted
 //! from the boot serial / CI).
 
 use crate::db::{Db, Status};
 use crate::scan;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 pub fn run(db_path: &Path) -> Result<(), String> {
     let _ = fs::remove_file(db_path);
 
-    // A throwaway tree to scan.
+    // A throwaway tree: two ordinary files plus one setuid binary for the audit.
     let root = std::env::temp_dir().join("eos-guard-selftest");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("sub")).map_err(|e| format!("mkdir: {e}"))?;
     fs::write(root.join("a.txt"), b"alpha").map_err(|e| format!("write a: {e}"))?;
     fs::write(root.join("sub/b.txt"), b"beta").map_err(|e| format!("write b: {e}"))?;
+    let suid = root.join("suid.bin");
+    fs::write(&suid, b"root-power").map_err(|e| format!("write suid: {e}"))?;
+    fs::set_permissions(&suid, fs::Permissions::from_mode(0o4755))
+        .map_err(|e| format!("chmod suid: {e}"))?;
 
     let roots = vec![root.to_string_lossy().into_owned()];
 
@@ -27,25 +33,42 @@ pub fn run(db_path: &Path) -> Result<(), String> {
         return Err(format!("journal_mode is '{mode}', expected 'wal'"));
     }
 
-    // Baseline the tree.
+    // Baseline the tree (3 files).
     let (entries, _) = scan::scan_roots(&roots, 10_000);
-    if entries.len() != 2 {
-        return Err(format!("expected 2 files, scanned {}", entries.len()));
+    if entries.len() != 3 {
+        return Err(format!("expected 3 files, scanned {}", entries.len()));
     }
     db.set_baseline(&entries)
         .map_err(|e| format!("set_baseline: {e}"))?;
-    if db.baseline_count().map_err(|e| format!("count: {e}"))? != 2 {
-        return Err("baseline count != 2".into());
+    if db.baseline_count().map_err(|e| format!("count: {e}"))? != 3 {
+        return Err("baseline count != 3".into());
+    }
+    if !db.verify_baseline().map_err(|e| format!("verify: {e}"))? {
+        return Err("fresh baseline fails its own digest".into());
     }
 
-    // A clean re-scan must be all-OK.
+    // A clean re-scan: no changes, but the audit must flag the setuid file.
     let (again, _) = scan::scan_roots(&roots, 10_000);
     let (findings, sum) = db.diff(&again).map_err(|e| format!("diff clean: {e}"))?;
-    if sum.ok != 2 || !findings.is_empty() {
-        return Err(format!("clean re-scan not all-OK: {sum:?}"));
+    if sum.modified != 0 || sum.new != 0 || sum.removed != 0 {
+        return Err(format!("clean re-scan shows changes: {sum:?}"));
+    }
+    if sum.ok != 2 {
+        return Err(format!("expected 2 OK on clean re-scan, got {}", sum.ok));
+    }
+    if sum.warn != 1 {
+        return Err(format!("expected 1 audit warning, got {}", sum.warn));
+    }
+    let warn = findings
+        .iter()
+        .find(|f| f.status == Status::Warn)
+        .ok_or("no WARN finding for the setuid file")?;
+    if !warn.path.ends_with("suid.bin") || !warn.detail.contains("setuid") {
+        return Err(format!("wrong audit finding: {warn:?}"));
     }
 
-    // Mutate one file, add one, remove one → MODIFIED + NEW + REMOVED.
+    // Mutate one file, add one, remove one → MODIFIED + NEW + REMOVED
+    // (the setuid file is unchanged, so it stays a WARN).
     fs::write(root.join("a.txt"), b"ALPHA-changed").map_err(|e| format!("rewrite a: {e}"))?;
     fs::write(root.join("c.txt"), b"gamma").map_err(|e| format!("write c: {e}"))?;
     fs::remove_file(root.join("sub/b.txt")).map_err(|e| format!("rm b: {e}"))?;
@@ -69,6 +92,21 @@ pub fn run(db_path: &Path) -> Result<(), String> {
         .ok_or("no MODIFIED finding")?;
     if !modified.path.ends_with("a.txt") {
         return Err(format!("wrong modified path: {}", modified.path));
+    }
+
+    // Tamper with the baseline out of band (as an attacker hiding a change would)
+    // and confirm the digest catches it.
+    {
+        let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("reopen raw: {e}"))?;
+        conn.execute(
+            "UPDATE baseline SET hash = 'deadbeef' WHERE path LIKE '%a.txt'",
+            [],
+        )
+        .map_err(|e| format!("tamper: {e}"))?;
+    }
+    let db = Db::open(db_path).map_err(|e| format!("reopen: {e}"))?;
+    if db.verify_baseline().map_err(|e| format!("verify2: {e}"))? {
+        return Err("tampered baseline still passes its digest".into());
     }
 
     let _ = fs::remove_dir_all(&root);

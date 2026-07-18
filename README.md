@@ -10,7 +10,13 @@ surfacing:
 - **ZMIENIONY** — the file's blake3 hash changed;
 - **NOWY** — a file that wasn't in the baseline;
 - **USUNIĘTY** — a baseline file that's gone;
-- **OSTRZEŻENIE** — a world-writable file (the security lint).
+- **OSTRZEŻENIE** — the permission audit: a setuid, setgid or world-writable file
+  (surfaced on every scan, regardless of whether the file changed).
+
+The baseline itself is protected by a blake3 **integrity digest** (`U-090`): a
+scan recomputes it and flags **⚠ WZORZEC NARUSZONY** if the baseline was edited
+out of band or corrupted. (The digest lives in the same DB, so it catches
+corruption and naive tampering — a key-signed baseline is future work.)
 
 - **UI:** Slint over the shared [`eos-ui`](https://gitlab.com/e-os/eos-ui)
   Orbital backend (software renderer, no GPU).
