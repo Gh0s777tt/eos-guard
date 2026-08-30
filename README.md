@@ -1,4 +1,19 @@
-# E-OS Guard
+# E-OS Guard — ARCHIVED
+
+> **This application no longer ships.** Its filesystem integrity monitor was consolidated into
+> **[eos-control](https://gitlab.com/e-os/eos-control)** in `U-095`, and it appears as
+> eos-control's Security tab. Verified 2026-08-30 by mounting the built image: no `eos-guard` binary,
+> no launcher entry, no package.
+>
+> The repository is kept because the code is the origin of a feature that still ships, and because
+> `repos.toml` still pins it. It is **not** maintained: no fixes, no releases, no security support.
+> Report anything about the shipped functionality against
+> [`eos-control`](https://gitlab.com/e-os/eos-control) instead.
+>
+> Everything below this line describes the application as it was when it last shipped, and is kept
+> for reference.
+
+---
 
 Crimson-themed **filesystem integrity monitor** for
 [E-OS](https://gitlab.com/e-os/e-os) — the second E-OS original application.
