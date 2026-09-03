@@ -20,11 +20,44 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 slint = { version = "1.17", default-features = false, features = ["compat-1-0", "std", "renderer-software"], optional = true }
 eos-ui = { git = "https://github.com/Gh0s777tt/eos-ui.git", rev = "c53180d40e5b91f15c848c4c39b1a307b14831a1", optional = true }
 
+# --- PR-008: desktop-host windowing backend -----------------------------------
+# `gui` above links NO windowing backend on a desktop host: eos-ui's Orbital
+# platform is `#[cfg(target_os = "redox")]` and the `slint` dependency turns
+# every backend off on purpose. The `host-backend` feature turns
+# `slint/backend-winit` back on; these two target-scoped dependencies exist only
+# so cargo's feature unification can bend that backend per OS. Neither is used
+# from our code.
+#
+# Windows: `muda` is not decoration. In i-slint-backend-winit 1.17.1 the
+# `WinitWindowOrNone::HasWindow` field `muda_adapter` is declared `#[cfg(muda)]`
+# (build.rs: muda = all(feature = "muda", any(windows, macos))) while the match
+# arm at winitwindowadapter.rs:913 is gated only `#[cfg(target_os = "windows")]`.
+# `muda` is an implicit feature (an optional dependency), so it is off by
+# default and the crate simply cannot compile for Windows without it:
+#   error[E0026]: variant `WinitWindowOrNone::HasWindow` does not have a field
+#   named `muda_adapter`
+[target.'cfg(target_os = "windows")'.dependencies]
+i-slint-backend-winit = { version = "1.17", default-features = false, features = ["renderer-software", "muda"], optional = true }
+
+# Linux: fontconfig would otherwise be *linked*, and its build script asks
+# pkg-config for the target sysroot, which a macOS -> Linux cross does not have:
+#   `pkg-config has not been configured to support cross-compilation`
+# (yeslogic-fontconfig-sys build.rs). `fontconfig-dlopen` moves fontconfig to a
+# runtime dlopen, so nothing target-specific is needed at build time. The pin is
+# `=1.17.1` because that is the version the rest of the Slint graph resolves to;
+# a looser pin would silently duplicate the crate and unify nothing.
+[target.'cfg(target_os = "linux")'.dependencies]
+i-slint-common = { version = "=1.17.1", default-features = false, features = ["fontconfig-dlopen"], optional = true }
+
 [features]
 # The GUI is a Redox-target concern; hosts build the CLI/selftest half only
 # (--no-default-features).
 default = ["gui"]
 gui = ["dep:slint", "dep:eos-ui"]
+# PR-008: the same GUI, on a desktop host. Adds the winit platform that `gui`
+# deliberately leaves out (see the target sections above). Used by
+# packaging/release.sh for the Windows and Linux downloads.
+host-backend = ["gui", "slint/backend-winit", "dep:i-slint-backend-winit", "dep:i-slint-common"]
 
 [build-dependencies]
 slint-build = "1.17"

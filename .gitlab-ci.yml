@@ -1,11 +1,18 @@
-# E-OS Guard CI — light tier on gitlab.com shared runners.
-# Hosts build the CLI/selftest half only (--no-default-features): the GUI
-# (Slint + eos-ui over orbclient) is a Redox-target concern, cross-built by the
-# meta-repo heavy image job.
+# E-OS Guard CI — two tiers, for two different reasons.
+#
+#   LIGHT (gitlab.com shared runners): fmt + a host build of the CLI/selftest half
+#   only (--no-default-features). The GUI (Slint + eos-ui over orbclient) is a
+#   Redox-target concern there, cross-built by the meta-repo heavy image job.
+#
+#   HEAVY (self-hosted `eos-heavy` Mac): the PR-008 per-OS download machinery at the
+#   bottom of this file. `packager-selftest` runs on every merge request and on main;
+#   `package-windows` and `package-linux` are manual, each with the measurement that
+#   made it manual written directly above it.
 
 stages:
   - lint
   - build
+  - package
 
 fmt:
   image: "rust:slim"
@@ -20,3 +27,164 @@ build-host:
   script:
     - cargo build --locked --no-default-features
     - cargo run --locked --no-default-features -- --selftest
+
+# ─────────────────────────  HEAVY: PR-008 per-OS downloads  ─────────────────────
+# Guard reaches Redox as a recipe, but the owner's PR-008 decision is that it must also
+# be downloadable on its own, per operating system. `packaging/release.sh` is that
+# machinery: it builds one target, then LOOKS AT THE FILE — `file -b` against a rule per
+# target, plus a 1 MiB floor — and refuses to call a build a package until the file
+# passes. A green `cargo build` is not evidence (CLAUDE.md §5.3).
+#
+# ONE OF THESE THREE JOBS RUNS AUTOMATICALLY, AND IT IS NOT EITHER OF THE TWO YOU EXPECT.
+# Measured on this runner 2026-09-03; both package jobs are `when: manual` because both
+# would be red on every pipeline, for two different and entirely honest reasons written
+# out above each job. A permanently red pipeline is not a gate, it is a pipeline everyone
+# learns to ignore — so what runs on every merge request is `packager-selftest`, which is
+# the one thing here that is both meaningful and green today.
+#
+# WHY `tags: [eos-heavy]` AND NO `image:`.  Two reasons, both measured. (1) The shared
+# runners are out of quota; the light jobs above die in ~0 s with `ci_quota_exceeded`
+# whenever they are. (2) The cross-build needs zig, cargo-zigbuild and the rustup targets,
+# and those live on the self-hosted Apple-Silicon Mac, which is a *shell* executor — an
+# `image:` there is ignored. A job left untagged sits pending forever, and a pipeline with
+# a job that never starts reads exactly like a pipeline whose job passed.
+#
+# WHY THE `target/` SYMLINK.  CLAUDE.md P-16 / §21.1: this host's internal disk has been
+# measured at 96-99 % full and a default TMPDIR resolves there, while
+# /Volumes/EOS-Podman has ~194 GiB free. `release.sh` addresses the binary as
+# `target/<triple>/release/…`, so the honest way to move a ~10 GB cross-build off the
+# internal disk is to make `target` point at the roomy volume — not to set
+# CARGO_TARGET_DIR and leave the script looking where the file no longer is.
+.package:
+  stage: package
+  tags: [eos-heavy]
+  needs: []
+  timeout: 40m
+  variables:
+    TMPDIR: "/Volumes/EOS-Podman/tmp"
+    EOS_XBUILD: "/Volumes/EOS-Podman/xbuild/eos-guard-ci"
+  before_script:
+    # rustup on this host is Homebrew's — cargo is NOT in ~/.cargo/bin (the meta-repo's
+    # `local-gates` job learned that the expensive way: "cargo: command not found").
+    - export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:$PATH"
+    - command -v cargo zig cargo-zigbuild python3 file
+    - mkdir -p "$EOS_XBUILD" "$TMPDIR"
+    - rm -rf target && ln -s "$EOS_XBUILD" target
+  artifacts:
+    name: "$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$CI_JOB_NAME"
+    paths: [dist/]
+    expire_in: 1 week
+
+# THE GATE THAT ACTUALLY RUNS.  `--selftest` feeds the packager's two checks seven
+# fabricated files and asserts each is refused (or accepted) as intended: a text file is
+# not a Windows binary, 2 MiB of zeroes is not a Mach-O, a missing file is not a binary,
+# an unknown triple has no rule at all, 512 KB is a stub, 2 MiB clears the floor.
+#
+# It exists because the checks' first negative test was "corrupt the .exe and re-run",
+# and that test PASSED GREEN twice — cargo noticed the output had changed and relinked
+# it, so the assertion ran against a freshly correct binary both times. A mutation the
+# build repairs is not a mutation (CLAUDE.md §5.9 level 2). To watch this job go red,
+# break one `case` arm in check_format: the selftest names the check that stopped
+# refusing and exits 1.
+#
+# Seconds, not minutes: it compiles nothing, so it is a real gate on every MR without
+# spending the runner.
+#
+# Deliberately NOT `extends: .package`. It needs no cross toolchain, no target symlink and
+# no artifacts, and `extends` deep-merges hashes — an `artifacts: {}` here would inherit
+# `paths: [dist/]` from the template and spend every run warning about a directory this
+# job never creates. Standalone is both cheaper and truthful about what it touches.
+packager-selftest:
+  stage: package
+  tags: [eos-heavy]
+  needs: []
+  timeout: 10m
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - bash packaging/release.sh --selftest
+
+# MANUAL — AND THE REASON IS GUARD, NOT THE TOOLCHAIN.  Measured 2026-09-03 on this
+# runner: `cargo zigbuild --target x86_64-pc-windows-gnu --features host-backend` ran for
+# 18 min 14 s, built the entire Slint/winit/muda graph (so the `muda` note in Cargo.toml
+# did its job) and compiled libsqlite3-sys' bundled C for Windows — then died in OUR crate
+# on four errors:
+#
+#   error[E0433]: cannot find `unix` in `os`   --> src/scan.rs:4:14
+#   error[E0433]: cannot find `unix` in `os`   --> src/selftest.rs:9:14
+#   error[E0599]: no method named `mode` found for struct `Permissions`
+#                                              --> src/scan.rs:81:39
+#   error[E0599]: no associated function or constant named `from_mode` found for struct
+#                 `Permissions`                --> src/selftest.rs:23:49
+#
+# That is the U-090 permission audit. setuid / setgid / world-writable are POSIX mode
+# bits and Windows has none: `Entry::security_flags` reads `mode & 0o4000|0o2000|0o0002`,
+# and `--selftest` — the headless proof this CI and the boot probe both rely on — chmods
+# a file 0o4755 and ASSERTS exactly one WARN comes back.
+#
+# So "Guard for Windows" is a product question and it belongs to the owner. The tempting
+# fix, `#[cfg(unix)]` over the audit, would ship something that looks exactly like Guard,
+# carries its name, and can never raise a permission finding: a check that can only pass
+# (CLAUDE.md §5.4, §21.6), sold as a security product.
+#
+# Deliberately NOT `allow_failure: true` — hence the explicit `allow_failure: false`,
+# because GitLab defaults manual jobs to true and a job whose red is ignored is decoration
+# (CLAUDE.md §13). Run it by hand the day the source is portable; if it fails when a human
+# runs it, the pipeline goes red like any other gate.
+package-windows:
+  extends: .package
+  variables:
+    EOS_XBUILD: "/Volumes/EOS-Podman/xbuild/eos-guard-ci-windows"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: manual
+      allow_failure: false
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: false
+  script:
+    - bash packaging/release.sh x86_64-pc-windows-gnu dist
+
+# MANUAL FOR A COMPLETELY DIFFERENT REASON: the BINARY is fine, the SCRIPT'S LINUX PATH
+# cannot run on a macOS runner. `release.sh` reaches for `cargo zigbuild` only under its
+# `*windows-gnu)` arm; every other target falls to plain `cargo build --target`, and the
+# script's own header says so — "x86_64-unknown-linux-gnu: run this script INSIDE a Linux
+# container". On this Apple-Silicon Mac that arm died after 21 min 25 s in the first C
+# dependency, because plain cargo has no cross compiler to offer cc-rs:
+#
+#   Compiling libsqlite3-sys v0.28.0
+#   CC_x86_64-unknown-linux-gnu = None ... CC = None ... CROSS_COMPILE = None
+#   error occurred in cc-rs: failed to find tool "x86_64-linux-gnu-gcc":
+#     No such file or directory (os error 2)
+#
+# The binary itself is NOT the problem, and this was measured rather than assumed: the
+# same tree, same flags, built through zigbuild —
+#   cargo zigbuild --locked --release --features host-backend \
+#     --target x86_64-unknown-linux-gnu        -> Finished in 15m 27s, exit 0
+#   file -b target/x86_64-unknown-linux-gnu/release/eos-guard
+#     ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked,
+#     interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 2.0.0, stripped
+#     21699848 bytes
+# — which clears both of the packager's checks (ELF x86-64, well over the 1 MiB floor).
+# So Guard cross-builds to Linux from macOS; the Cargo.toml `fontconfig-dlopen` stanza
+# does its job, and zig cross-compiles the bundled SQLite C without complaint.
+#
+# Two ways to make this job automatic, neither taken here because editing the packager is
+# out of scope for this MR: give the `*linux-gnu)` case its own `cargo zigbuild` arm, or
+# point the job at an x86_64 Linux runner and let the existing `cargo build` arm work as
+# the script's header intends. Until one of those lands, `when:` stays manual rather than
+# red on every pipeline.
+package-linux:
+  extends: .package
+  variables:
+    EOS_XBUILD: "/Volumes/EOS-Podman/xbuild/eos-guard-ci-linux"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: manual
+      allow_failure: false
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: false
+  script:
+    - bash packaging/release.sh x86_64-unknown-linux-gnu dist
