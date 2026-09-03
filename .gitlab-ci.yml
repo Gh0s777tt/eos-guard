@@ -9,10 +9,35 @@
 #   `package-windows` and `package-linux` are manual, each with the measurement that
 #   made it manual written directly above it.
 
+# ONE PIPELINE PER PUSH, NOT TWO (meta-repo ROADMAP `RH-017`).
+# Measured 2026-09-03: every push produced a `push` pipeline AND a
+# `merge_request_event` pipeline, both running the same jobs. On shared runners
+# that is invisible -- they die on quota either way. It stops being invisible
+# the moment a job does real work: the same ~20-minute cross build ran twice
+# per push on a runner with `concurrent = 1`, so the duplicate did not merely
+# waste time, it delayed every job behind it.
+#
+# This is the SECOND shape of the rule. The first was GitLab's own documented
+# template, `$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUEST_IID` -> `when: never`,
+# and in this group it deduplicated nothing: that variable is not populated in
+# these branch pipelines, so the `never` arm never matched. The rule below says
+# what it means instead of leaning on a variable nobody here can observe.
+#
+# The trade, stated rather than discovered: a branch pushed WITHOUT a merge
+# request gets no pipeline at all. Branch-then-merge-request is the norm here.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: never
+
 stages:
   - lint
   - build
   - package
+  - checks
 
 fmt:
   image: "rust:slim"
@@ -192,3 +217,71 @@ package-linux:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
     - bash packaging/release.sh x86_64-unknown-linux-gnu dist
+
+# ───────────────────────  THE GATES THAT HAD NEVER RUN  ───────────────────────
+# Measured 2026-09-03 on the last `main` pipeline of this repository: every
+# quality job died in ~0 s with `ci_quota_exceeded`, so fmt, clippy, the test
+# suite and the coverage floor have NEVER executed on a merge request -- not
+# once. The YAML looked complete and the pipeline looked busy, which is exactly
+# why nobody noticed (meta-repo ROADMAP `RH-018`; section 13: a check that
+# cannot execute does not exist).
+#
+# This job is the same gates on the runner that actually runs. It does not
+# replace the light tier: when shared minutes come back, those jobs are still
+# the cheaper place for this work, and duplication that is measured beats a gap
+# that is not.
+#
+# WHY COVERAGE IS MEASURED IN TWO PASSES. `cargo llvm-cov` alone reports what
+# `cargo test` exercises. In this ecosystem the functional proof of a GUI
+# product is its `--selftest` binary, which `cargo test` never runs -- so the
+# instrument was pointed at the wrong runner and answered accordingly.
+# Measured on this exact tree, both numbers:
+#
+#   eos-sheets/slides/drive/store   test only 55.35 %   +selftest 64.19 %
+#   eos-notes                       test only  0.00 %   +selftest 39.64 %
+#   eos-guard                       test only  0.00 %   +selftest 63.15 %
+#
+# Three products reading 0.00 % were not untested; the measurement was.
+# Section 4.2 -- check the instrument before believing a negative result.
+checks-heavy:
+  stage: checks
+  tags: [eos-heavy]
+  # Same reason as the packaging jobs: without this the job is skipped whenever
+  # the shared-runner jobs above die, which is every pipeline.
+  needs: []
+  timeout: 40m
+  variables:
+    TMPDIR: "/Volumes/EOS-Podman/tmp"
+    EOS_XBUILD: "/Volumes/EOS-Podman/xbuild/eos-guard-ci-checks"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  before_script:
+    # Homebrew's rustup keeps cargo OUTSIDE ~/.cargo/bin. The meta-repo's
+    # `local-gates` job learned that the expensive way: "cargo: not found".
+    - export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:$PATH"
+    - export PATH="/opt/homebrew/bin:$PATH"
+    - command -v cargo python3
+    - mkdir -p "$EOS_XBUILD" "$TMPDIR"
+    # The internal disk has been measured at 92-99 % full; /Volumes/EOS-Podman
+    # has room. `target` is a symlink rather than CARGO_TARGET_DIR so that
+    # every tool agrees about where things are.
+    - rm -rf target && ln -s "$EOS_XBUILD" target
+    # A missing tool must FAIL, not skip: a coverage floor that silently does
+    # not run is the whole defect this job exists to fix.
+    - rustup component add llvm-tools-preview
+    - command -v cargo-llvm-cov || cargo install --locked cargo-llvm-cov
+  script:
+    - cargo fmt -- --check
+    - cargo clippy --locked --all-targets -- -D warnings
+    - cargo test --locked
+    - cargo llvm-cov clean --workspace
+    - cargo llvm-cov --no-report --locked
+    # The second pass: the selftest binary, where the functional proof lives.
+    - cargo llvm-cov --no-report --locked run -- --selftest
+    # NO FLOOR, deliberately. This repository has never declared one, and
+    # inventing a number here would be a floor nobody agreed to. Section
+    # 5.10 rule 1 cuts both ways: raising a floor is an ordinary commit,
+    # but the FIRST floor is the owner's call. The number is reported so
+    # that decision has something to stand on.
+    - cargo llvm-cov report --summary-only
