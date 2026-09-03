@@ -10,9 +10,20 @@
 #
 #   aarch64-apple-darwin     native `cargo build`                           ~4 min
 #   x86_64-pc-windows-gnu    `cargo zigbuild`, needs zig + cargo-zigbuild   ~1.5 min
-#   x86_64-unknown-linux-gnu run this script INSIDE a Linux container. A zig cross from macOS
-#                            fails in yeslogic-fontconfig-sys' build.rs, which wants a pkg-config
-#                            sysroot for the target -- measured, not assumed.
+#   x86_64-unknown-linux-gnu `cargo zigbuild` as well                       ~3 min
+#
+# THE LINUX ARM IS A CORRECTION, and the wrong version of it cost four agents about an hour of
+# successful compilation each. The first draft of this script sent ONLY `*windows-gnu` through
+# cargo zigbuild and let every other triple fall through to plain `cargo build --target`. On macOS
+# that hands GNU linker flags to Apple's ld:
+#
+#   ld: unknown options: --as-needed -Bstatic -Bdynamic --eh-frame-hdr -z --gc-sections
+#   error: could not compile ... (bin "...") due to 1 previous error
+#
+# The header above it was wrong in the same way: it said a zig cross to Linux "fails in
+# yeslogic-fontconfig-sys' build.rs". That WAS true, and stopped being true the moment
+# `i-slint-common/fontconfig-dlopen` moved fontconfig from link time to runtime -- the comment
+# outlived the measurement it described. Any GNU or musl Linux triple goes through zigbuild now.
 #
 # WHY THE CHECKS ARE FUNCTIONS AND WHY --selftest EXISTS.  The first version of this script checked
 # the built binary inline, and its negative test was "corrupt the .exe and re-run". That test
@@ -42,6 +53,13 @@ check_format() {
   esac
   die "$f is not what $target implies -- file says: $kind"
   return 1
+}
+
+needs_zig() {
+  case "$1" in
+    *windows-gnu|*linux-gnu|*linux-gnueabi*|*linux-musl*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # check_size <file>: a Slint binary with the software renderer and an embedded font is tens of
@@ -80,6 +98,17 @@ selftest() {
   run 1 "a 512 KB file is a stub"             check_size   "$tmp/small"
   run 0 "a 2 MiB file passes the size floor"  check_size   "$tmp/big"
 
+  # The routing decision gets its own cases, because getting it wrong is exactly what happened:
+  # only Windows went through zig, so Linux quietly used the host linker and died after twenty
+  # minutes of successful compilation. A rule this cheap to check should never be checked by
+  # waiting for a build.
+  run 0 "windows-gnu needs zig"               needs_zig x86_64-pc-windows-gnu
+  run 0 "linux-gnu needs zig"                 needs_zig x86_64-unknown-linux-gnu
+  run 0 "aarch64 linux-gnu needs zig"         needs_zig aarch64-unknown-linux-gnu
+  run 0 "linux-musl needs zig"                needs_zig x86_64-unknown-linux-musl
+  run 1 "apple-darwin does not need zig"      needs_zig aarch64-apple-darwin
+  run 1 "redox does not need zig"             needs_zig x86_64-unknown-redox
+
   if [ "$fails" -gt 0 ]; then
     printf 'release: selftest FAILED -- %d check(s) did not behave\n' "$fails"; return 1
   fi
@@ -105,21 +134,25 @@ NAME="$(meta name)"
 VERSION="$(meta version)"
 HOST="$(rustc -vV | awk '/^host:/{print $2}')"
 
-case "$TARGET" in
-  *windows-gnu)
-    command -v cargo-zigbuild >/dev/null 2>&1 || cannot "cargo-zigbuild is missing (cargo install cargo-zigbuild)"
-    command -v zig >/dev/null 2>&1 || cannot "zig is missing (brew install zig)"
-    cargo zigbuild --locked --release --features host-backend --target "$TARGET"
-    BIN="target/$TARGET/release/$NAME.exe" ;;
-  *)
-    if [ "$TARGET" = "$HOST" ]; then
-      cargo build --locked --release --features host-backend
-      BIN="target/release/$NAME"
-    else
-      cargo build --locked --release --features host-backend --target "$TARGET"
-      BIN="target/$TARGET/release/$NAME"
-    fi ;;
-esac
+# A target that is not this host and is not Apple needs a cross linker, and zig IS that linker.
+# Deciding by triple rather than by "is it Windows" is the whole fix: the previous shape asked the
+# wrong question and answered it correctly. (needs_zig is defined with the other checks above, so
+# --selftest can exercise it without running a build.)
+if [ "$TARGET" = "$HOST" ]; then
+  cargo build --locked --release --features host-backend
+  BIN="target/release/$NAME"
+elif needs_zig "$TARGET"; then
+  command -v cargo-zigbuild >/dev/null 2>&1 || cannot "cargo-zigbuild is missing (cargo install cargo-zigbuild)"
+  command -v zig >/dev/null 2>&1 || cannot "zig is missing (brew install zig)"
+  cargo zigbuild --locked --release --features host-backend --target "$TARGET"
+  case "$TARGET" in
+    *windows*) BIN="target/$TARGET/release/$NAME.exe" ;;
+    *)         BIN="target/$TARGET/release/$NAME" ;;
+  esac
+else
+  cargo build --locked --release --features host-backend --target "$TARGET"
+  BIN="target/$TARGET/release/$NAME"
+fi
 
 check_format "$BIN" "$TARGET" || exit 1
 check_size   "$BIN"           || exit 1

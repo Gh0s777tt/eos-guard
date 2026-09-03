@@ -35,12 +35,16 @@ build-host:
 # target, plus a 1 MiB floor — and refuses to call a build a package until the file
 # passes. A green `cargo build` is not evidence (CLAUDE.md §5.3).
 #
-# ONE OF THESE THREE JOBS RUNS AUTOMATICALLY, AND IT IS NOT EITHER OF THE TWO YOU EXPECT.
-# Measured on this runner 2026-09-03; both package jobs are `when: manual` because both
-# would be red on every pipeline, for two different and entirely honest reasons written
-# out above each job. A permanently red pipeline is not a gate, it is a pipeline everyone
-# learns to ignore — so what runs on every merge request is `packager-selftest`, which is
-# the one thing here that is both meaningful and green today.
+# TWO OF THESE THREE JOBS RUN AUTOMATICALLY, AND ONE DOES NOT — for a product reason, not
+# a tooling one. `packager-selftest` and `package-linux` run on every merge request and on
+# the default branch. `package-windows` stays manual because Guard's source is POSIX-only
+# where it matters most; the argument is written out above that job and has not weakened.
+#
+# AMENDED 2026-09-03: `package-linux` used to be manual too, and the reason given was that
+# `packaging/release.sh` could not cross-build Linux from macOS. That was measured, it was
+# true, and it is now false — the template routes GNU and musl Linux triples through
+# `cargo zigbuild`, which is exactly the fix the old comment below asked for. The old
+# measurement is kept rather than deleted: it is what earned the fix.
 #
 # WHY `tags: [eos-heavy]` AND NO `image:`.  Two reasons, both measured. (1) The shared
 # runners are out of quota; the light jobs above die in ~0 s with `ci_quota_exceeded`
@@ -146,12 +150,14 @@ package-windows:
   script:
     - bash packaging/release.sh x86_64-pc-windows-gnu dist
 
-# MANUAL FOR A COMPLETELY DIFFERENT REASON: the BINARY is fine, the SCRIPT'S LINUX PATH
-# cannot run on a macOS runner. `release.sh` reaches for `cargo zigbuild` only under its
-# `*windows-gnu)` arm; every other target falls to plain `cargo build --target`, and the
-# script's own header says so — "x86_64-unknown-linux-gnu: run this script INSIDE a Linux
-# container". On this Apple-Silicon Mac that arm died after 21 min 25 s in the first C
-# dependency, because plain cargo has no cross compiler to offer cc-rs:
+# AUTOMATIC SINCE 2026-09-03, AND THE OLD REASON FOR IT NOT BEING SO IS KEPT BELOW,
+# because the fix it asked for is the fix that landed. What follows was true when written:
+# the BINARY was fine and the SCRIPT'S LINUX PATH could not run on a macOS runner.
+# `release.sh` reached for `cargo zigbuild` only under its `*windows-gnu)` arm; every other
+# target fell to plain `cargo build --target`, and the script's own header said so —
+# "x86_64-unknown-linux-gnu: run this script INSIDE a Linux container". On this
+# Apple-Silicon Mac that arm died after 21 min 25 s in the first C dependency, because
+# plain cargo has no cross compiler to offer cc-rs:
 #
 #   Compiling libsqlite3-sys v0.28.0
 #   CC_x86_64-unknown-linux-gnu = None ... CC = None ... CROSS_COMPILE = None
@@ -170,21 +176,19 @@ package-windows:
 # So Guard cross-builds to Linux from macOS; the Cargo.toml `fontconfig-dlopen` stanza
 # does its job, and zig cross-compiles the bundled SQLite C without complaint.
 #
-# Two ways to make this job automatic, neither taken here because editing the packager is
-# out of scope for this MR: give the `*linux-gnu)` case its own `cargo zigbuild` arm, or
-# point the job at an x86_64 Linux runner and let the existing `cargo build` arm work as
-# the script's header intends. Until one of those lands, `when:` stays manual rather than
-# red on every pipeline.
+# The first of the two ways out named here — "give the `*linux-gnu)` case its own
+# `cargo zigbuild` arm" — is what the shared template now does, decided by triple in a
+# `needs_zig` function whose cases `--selftest` exercises without running a build.
+# Measured through the packager after the fix, on the sibling product eos-sheets:
+#   release: dist/eos-sheets-0.1.0-x86_64-unknown-linux-gnu.tar.gz  7666611 bytes
+#            (ELF 64-bit LSB pie executable, x86-64 ... for GNU/Linux 2.0.0, stripped)
+# So this job is automatic now, with no `allow_failure`: red here means a defect.
 package-linux:
   extends: .package
   variables:
     EOS_XBUILD: "/Volumes/EOS-Podman/xbuild/eos-guard-ci-linux"
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-      when: manual
-      allow_failure: false
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      when: manual
-      allow_failure: false
   script:
     - bash packaging/release.sh x86_64-unknown-linux-gnu dist
