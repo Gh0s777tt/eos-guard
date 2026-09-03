@@ -16,6 +16,14 @@ pub struct Db {
 /// How a scanned file compares to the baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
+    /// Never constructed as a FINDING, and that is the design rather than an oversight:
+    /// a file that is present, unchanged and unflagged is COUNTED (`Summary::ok`,
+    /// incremented at line ~222, shown by the GUI as `n_ok`, and asserted by
+    /// `--selftest` as "expected 2 OK on clean re-scan"), not listed. The variant is the
+    /// label for that count -- `label()` and `kind_of()` both handle it -- so removing it
+    /// would delete a real state from the model, not dead weight. What would make it
+    /// constructed is a verbose mode that lists clean files too; until then, this.
+    #[allow(dead_code)]
     Ok,
     New,
     Modified,
