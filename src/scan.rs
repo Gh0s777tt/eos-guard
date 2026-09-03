@@ -31,10 +31,6 @@ impl Entry {
         }
         flags
     }
-
-    pub fn has_security_flags(&self) -> bool {
-        self.mode & 0o6002 != 0
-    }
 }
 
 fn blake3_file(path: &Path) -> std::io::Result<String> {
