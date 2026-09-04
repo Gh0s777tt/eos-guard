@@ -51,6 +51,7 @@ fn show(win: &MainWindow, findings: &[db::Finding], sum: db::Summary) {
     win.set_n_modified(sum.modified as i32);
     win.set_n_removed(sum.removed as i32);
     win.set_n_warn(sum.warn as i32);
+    win.set_n_out_of_scope(sum.out_of_scope as i32);
 }
 
 pub fn run() {
@@ -96,7 +97,7 @@ pub fn run() {
             let (entries, truncated) = scan::scan_roots(&roots, SCAN_BUDGET);
             let n = entries.len();
             let mut app = app.borrow_mut();
-            match app.db.set_baseline(&entries) {
+            match app.db.set_baseline(&entries, &roots) {
                 Ok(()) => win.set_status(SharedString::from(format!(
                     "Wzorzec ustawiony: {n} plików{}.",
                     if truncated {
@@ -129,12 +130,16 @@ pub fn run() {
             let (entries, truncated) = scan::scan_roots(&roots, SCAN_BUDGET);
             let app = app.borrow();
             let state = app.db.verify_baseline();
-            match app.db.diff(&entries) {
+            // The roots the person typed decide what this scan actually covered, so they go to
+            // `diff` too: a baseline path outside them was not checked, and must not be called
+            // removed. `scope` reads what the baseline recorded, and only names the difference.
+            let scope = app.db.scope(&roots);
+            match app.db.diff(&entries, &roots) {
                 Ok((findings, sum)) => {
                     let changed = sum.new + sum.modified + sum.removed + sum.warn;
                     show(&win, &findings, sum);
                     win.set_status(SharedString::from(format!(
-                        "Przeskanowano {} plików: {} zmian/ostrzeżeń{}.{}",
+                        "Przeskanowano {} plików: {} zmian/ostrzeżeń{}.{}{}",
                         entries.len(),
                         changed,
                         if truncated {
@@ -148,7 +153,10 @@ pub fn run() {
                             String::new()
                         } else {
                             format!("  ⚠ WZORZEC {}", state.describe())
-                        }
+                        },
+                        // The scope line. `scope_note` owns the "when to stay quiet" rule so it
+                        // can be tested without a window -- an unchanged scope prints nothing.
+                        db::scope_note(&scope, sum.out_of_scope).unwrap_or_default()
                     )));
                 }
                 Err(err) => win.set_status(SharedString::from(format!("Błąd skanu: {err}"))),
