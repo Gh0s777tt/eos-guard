@@ -49,7 +49,9 @@ impl BaselineState {
         match self {
             Self::Intact => "nienaruszony".to_string(),
             Self::Tampered => "NARUSZONY".to_string(),
-            Self::NoDigest => "BEZ ODCISKU — nie da się stwierdzić, czy jest nienaruszony".to_string(),
+            Self::NoDigest => {
+                "BEZ ODCISKU — nie da się stwierdzić, czy jest nienaruszony".to_string()
+            }
             Self::Unreadable(e) => format!("NIE DA SIĘ SPRAWDZIĆ ({e})"),
         }
     }
@@ -227,7 +229,10 @@ impl Db {
         let Some(stored) = stored else {
             return BaselineState::NoDigest;
         };
-        let mut stmt = match self.conn.prepare("SELECT path, hash, size, mode FROM baseline") {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT path, hash, size, mode FROM baseline")
+        {
             Ok(s) => s,
             Err(e) => return BaselineState::Unreadable(e.to_string()),
         };
@@ -388,7 +393,10 @@ mod tests {
             .conn
             .execute("DELETE FROM meta WHERE k = 'baseline_digest'", [])
             .expect("delete digest");
-        assert_eq!(n, 1, "the digest row was not there to delete -- test is vacuous");
+        assert_eq!(
+            n, 1,
+            "the digest row was not there to delete -- test is vacuous"
+        );
         assert_eq!(db.verify_baseline(), BaselineState::NoDigest);
         assert!(!db.verify_baseline().is_intact());
     }
