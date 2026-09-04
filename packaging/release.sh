@@ -129,7 +129,9 @@ command -v cargo >/dev/null 2>&1 || cannot "cargo is not on PATH"
 [ -f Cargo.toml ] || cannot "run me from the repository root (no Cargo.toml here)"
 command -v python3 >/dev/null 2>&1 || cannot "python3 is needed to read cargo metadata"
 
-meta() { cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json; print(json.load(sys.stdin)['packages'][0]['$1'])"; }
+# The ROOT package, not `packages[0]`: with a workspace (eos-guard has one since PR-004)
+# `cargo metadata` lists the members too, in no promised order, and `[0]` was the engine.
+meta() { cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json,os; m=json.load(sys.stdin); print([p for p in m['packages'] if p['manifest_path']==os.path.join(m['workspace_root'],'Cargo.toml')][0]['$1'])"; }
 NAME="$(meta name)"
 VERSION="$(meta version)"
 HOST="$(rustc -vV | awk '/^host:/{print $2}')"

@@ -1062,10 +1062,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "eos-fsintegrity"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rusqlite",
+]
+
+[[package]]
 name = "eos-guard"
 version = "0.2.0"
 dependencies = [
- "blake3",
+ "eos-fsintegrity",
  "eos-ui",
  "i-slint-backend-winit",
  "i-slint-common",

@@ -7,14 +7,21 @@ description = "E-OS Guard — Crimson-themed filesystem integrity monitor (blake
 repository = "https://gitlab.com/e-os/eos-guard"
 build = "build.rs"
 
+# The file-integrity engine is a workspace member (PR-004): `eos-guard` stays the root
+# package, so `cargo install --path .` -- what cookbook_cargo runs -- keeps working, and a
+# git dependency on `eos-fsintegrity` resolves by name from this repository.
+[workspace]
+members = ["crates/eos-fsintegrity"]
+
 [[bin]]
 name = "eos-guard"
 path = "src/main.rs"
 
 [dependencies]
-# Portable-Rust blake3 (default-features off drops the C/asm SIMD paths that
-# don't cross-compile cleanly) — the same hash pkgar/the SBOM use.
-blake3 = { version = "1", default-features = false }
+# The engine: walk + blake3 + SQLite/WAL baseline + diff. blake3 arrives through it;
+# rusqlite stays a direct dependency because `--selftest` tampers with the baseline
+# through a raw connection to prove the digest catches it.
+eos-fsintegrity = { path = "crates/eos-fsintegrity" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 # GUI: Slint widgets + the shared eos-ui Orbital backend.
 slint = { version = "1.17", default-features = false, features = ["compat-1-0", "std", "renderer-software"], optional = true }

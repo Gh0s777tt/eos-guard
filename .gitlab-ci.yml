@@ -272,13 +272,17 @@ checks-heavy:
     - rustup component add llvm-tools-preview
     - command -v cargo-llvm-cov || cargo install --locked cargo-llvm-cov
   script:
-    - cargo fmt -- --check
-    - cargo clippy --locked --all-targets -- -D warnings
-    - cargo test --locked
+    - cargo fmt --all -- --check
+    - cargo clippy --locked --workspace --all-targets -- -D warnings
+    # `--workspace` is not cosmetic (PR-004): at a workspace root `cargo test` runs the
+    # ROOT package only, so the engine's tests in crates/eos-fsintegrity would never
+    # execute here while the job stayed green -- the CLAUDE.md 5.4 defect, re-created
+    # by the change that moved them. Same for the two coverage passes below.
+    - cargo test --locked --workspace
     - cargo llvm-cov clean --workspace
-    - cargo llvm-cov --no-report --locked
+    - cargo llvm-cov --no-report --locked --workspace
     # The second pass: the selftest binary, where the functional proof lives.
-    - cargo llvm-cov --no-report --locked run -- --selftest
+    - cargo llvm-cov --no-report --locked --workspace run -- --selftest
     # NO FLOOR, deliberately. This repository has never declared one, and
     # inventing a number here would be a floor nobody agreed to. Section
     # 5.10 rule 1 cuts both ways: raising a floor is an ordinary commit,

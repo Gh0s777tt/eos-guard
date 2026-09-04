@@ -1,17 +1,14 @@
 //! The Slint GUI half of E-OS Guard (Redox-target concern; hosts may build with
 //! `--no-default-features` for the CLI/selftest half only).
 
-use crate::db::{self, Status};
-use crate::scan;
+use crate::paths;
+use eos_fsintegrity::db::{self, Status};
+use eos_fsintegrity::{parse_roots, scan, DEFAULT_SCAN_BUDGET as SCAN_BUDGET};
 use slint::{ModelRc, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 slint::include_modules!();
-
-/// Cap the number of files a single GUI scan hashes, so pointing Guard at a huge
-/// tree can't wedge the single-threaded event loop.
-const SCAN_BUDGET: usize = 20_000;
 
 fn kind_of(status: Status) -> i32 {
     match status {
@@ -21,14 +18,6 @@ fn kind_of(status: Status) -> i32 {
         Status::Removed => 3,
         Status::Warn => 4,
     }
-}
-
-fn parse_roots(s: &str) -> Vec<String> {
-    s.split(',')
-        .map(|r| r.trim())
-        .filter(|r| !r.is_empty())
-        .map(str::to_string)
-        .collect()
 }
 
 struct App {
@@ -59,7 +48,7 @@ pub fn run() {
     eos_ui::init("E-OS Guard");
 
     let database =
-        db::Db::open(&db::default_path()).expect("eos-guard: cannot open the baseline database");
+        db::Db::open(&paths::baseline_db()).expect("eos-guard: cannot open the baseline database");
     let app = Rc::new(RefCell::new(App { db: database }));
 
     let win = MainWindow::new().expect("eos-guard: cannot create the window");
