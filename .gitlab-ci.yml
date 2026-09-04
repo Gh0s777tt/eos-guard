@@ -272,16 +272,26 @@ checks-heavy:
     - rustup component add llvm-tools-preview
     - command -v cargo-llvm-cov || cargo install --locked cargo-llvm-cov
   script:
-    - cargo fmt -- --check
-    - cargo clippy --locked --all-targets -- -D warnings
-    - cargo test --locked
+    - cargo fmt --all -- --check
+    - cargo clippy --locked --workspace --all-targets -- -D warnings
+    # `--workspace` is not cosmetic (PR-004): at a workspace root `cargo test` runs the
+    # ROOT package only, so the engine's tests in crates/eos-fsintegrity would never
+    # execute here while the job stayed green -- the CLAUDE.md 5.4 defect, re-created
+    # by the change that moved them. Same for the two coverage passes below.
+    - cargo test --locked --workspace
     - cargo llvm-cov clean --workspace
-    - cargo llvm-cov --no-report --locked
-    # The second pass: the selftest binary, where the functional proof lives.
+    - cargo llvm-cov --no-report --locked --workspace
+    # The second pass: the selftest binary, where the functional proof lives. No
+    # `--workspace` here: cargo-llvm-cov refuses it for `run` (measured on !6, exit 1),
+    # and `run` builds the root binary, which links the engine, so the engine's lines
+    # exercised by --selftest are still counted in the report below.
     - cargo llvm-cov --no-report --locked run -- --selftest
     # NO FLOOR, deliberately. This repository has never declared one, and
     # inventing a number here would be a floor nobody agreed to. Section
     # 5.10 rule 1 cuts both ways: raising a floor is an ordinary commit,
     # but the FIRST floor is the owner's call. The number is reported so
     # that decision has something to stand on.
-    - cargo llvm-cov report --summary-only
+    # `--workspace` on the report as well: without it the summary lists the root
+    # package only. Measured on this tree: 44.05 % without, 77.39 % with -- the
+    # engine (db.rs 94.5 %, scan.rs 85.7 %, lib.rs 100 %) simply did not appear.
+    - cargo llvm-cov report --summary-only --workspace

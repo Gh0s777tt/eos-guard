@@ -3,8 +3,8 @@
 //! `eos-guard --selftest`. Prints `GUARD-SELFTEST-OK` on success (asserted
 //! from the boot serial / CI).
 
-use crate::db::{self, BaselineState, Db, ScopeState, Status};
-use crate::scan;
+use eos_fsintegrity::db::{self, BaselineState, Db, ScopeState, Status};
+use eos_fsintegrity::scan;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

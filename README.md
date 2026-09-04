@@ -61,6 +61,25 @@ corruption and naive tampering — a key-signed baseline is future work.)
 - **Hash:** `blake3` (portable Rust) — the same hash `pkgar` and the SBOM use.
 - **Storage:** SQLite/WAL at `$HOME/.local/share/eos-guard/baseline.db`.
 
+## Crate layout — one engine, two products (`PR-004`)
+
+The walk, the hashing and the baseline store live in the workspace member
+[`crates/eos-fsintegrity`](crates/eos-fsintegrity) (`eos_fsintegrity::{scan, db}`,
+plus `parse_roots` and `DEFAULT_SCAN_BUDGET`); this repository's root package is the
+Guard binary, which depends on it by path. `eos-control`'s Security tab depends on the
+same crate by git revision, so the engine exists once instead of as two copies that
+have to be patched twice. A workspace **member** rather than a separate repository, on
+the `eos-credpolicy` precedent: a git dependency finds a package by name among a
+repository's workspace members, and a member needs no third mirror and no third pin.
+
+What is deliberately **not** in the crate: where the database lives. `src/paths.rs`
+keeps the path above, unchanged; whether Guard and Control should go on sharing one
+file is an open owner decision, and moving the engine did not pre-empt it.
+
+The engine's unit tests run only with `cargo test --workspace` — at a workspace root
+plain `cargo test` runs the root package alone (measured: 1 test instead of 26), which
+is why CI says `--workspace` on every test and coverage line.
+
 ## Headless self-test
 
 `eos-guard --selftest` proves the pipeline without a display: it builds a

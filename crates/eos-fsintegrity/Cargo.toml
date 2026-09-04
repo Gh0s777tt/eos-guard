@@ -1,0 +1,23 @@
+[package]
+name = "eos-fsintegrity"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "E-OS file-integrity engine: directory walk + blake3 hashing + SQLite/WAL baseline and diff, shared by E-OS Guard and the E-OS Control Security tab (ROADMAP PR-004)"
+repository = "https://gitlab.com/e-os/eos-guard"
+
+# A workspace MEMBER of the eos-guard repository rather than its own repository, on the
+# eos-credpolicy precedent (eos-userutils/credpolicy): a git dependency finds a package by
+# name among a repository's workspace members, so eos-control can depend on this crate at a
+# pinned eos-guard revision without a third repository, a third mirror and a third pin.
+# No build.rs, no Slint, no eos-ui: a consumer gets the engine and nothing of the window.
+
+[lib]
+name = "eos_fsintegrity"
+path = "src/lib.rs"
+
+[dependencies]
+# Portable-Rust blake3 (default-features off drops the C/asm SIMD paths that
+# don't cross-compile cleanly) — the same hash pkgar/the SBOM use.
+blake3 = { version = "1", default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }

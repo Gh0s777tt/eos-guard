@@ -8,11 +8,13 @@
 //! feature — a Redox-target concern).
 //! `eos-guard --selftest` runs the headless scan/diff proof and prints
 //! GUARD-SELFTEST-OK.
+//!
+//! The engine itself (walk, hash, baseline, diff) is the workspace crate
+//! `crates/eos-fsintegrity`, shared with `eos-control` (ROADMAP `PR-004`).
 
-mod db;
 #[cfg(feature = "gui")]
 mod gui;
-mod scan;
+mod paths;
 mod selftest;
 
 fn main() {
