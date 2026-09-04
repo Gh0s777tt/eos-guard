@@ -9,6 +9,52 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// What the baseline's own digest says about the baseline.
+///
+/// THIS IS AN ENUM BECAUSE A BOOL COULD NOT TELL THE TRUTH HERE. `verify_baseline` used to return
+/// `rusqlite::Result<bool>`, and there are two distinct ways the answer is neither yes nor no --
+/// no digest was ever recorded, and the database could not be read. Both were being spelled
+/// `true`, which is the spelling that means "safe":
+///
+///   * the function itself returned `Ok(true)` when `meta.baseline_digest` was absent, so deleting
+///     ONE ROW turned tamper detection off permanently and the window said "intact";
+///   * every caller wrote `.unwrap_or(true)`, so a database error said "intact" too.
+///
+/// Four call sites across two products chose the open default in a program whose only job is to
+/// notice that something changed. CLAUDE.md section 5.5 asks for fail-closed with an explicit
+/// exception; this was fail-open with none. The type now refuses to carry that answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BaselineState {
+    /// The digest recomputed from the stored rows matches the recorded one.
+    Intact,
+    /// It does not: the rows were edited out of band, or the store is corrupt.
+    Tampered,
+    /// No digest is recorded. Either the baseline predates digest support, or somebody removed the
+    /// row. THE TWO ARE INDISTINGUISHABLE FROM HERE, which is exactly why this may not be reported
+    /// as intact -- the cheapest attack on a digest kept beside its data is to delete the digest.
+    NoDigest,
+    /// The store could not be read. Carries the error so the window can say what happened rather
+    /// than fall back to a reassuring default.
+    Unreadable(String),
+}
+
+impl BaselineState {
+    /// True for `Intact` and nothing else. Every other state is a thing to tell the person about.
+    pub fn is_intact(&self) -> bool {
+        matches!(self, Self::Intact)
+    }
+
+    /// A phrase for the status line, in the language the rest of this window speaks.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Intact => "nienaruszony".to_string(),
+            Self::Tampered => "NARUSZONY".to_string(),
+            Self::NoDigest => "BEZ ODCISKU — nie da się stwierdzić, czy jest nienaruszony".to_string(),
+            Self::Unreadable(e) => format!("NIE DA SIĘ SPRAWDZIĆ ({e})"),
+        }
+    }
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -155,14 +201,23 @@ impl Db {
         hasher.finalize().to_hex().to_string()
     }
 
-    /// Recompute the baseline digest from the stored rows and compare it to the
-    /// recorded one. `Ok(true)` means intact; `Ok(false)` means the baseline was
-    /// edited/corrupted out of band (or predates digest support).
+    /// Recompute the baseline digest from the stored rows and compare it to the recorded one.
     ///
-    /// NOTE: the digest lives in the same database, so this catches corruption
-    /// and naive tampering — not an attacker who also recomputes it. A
-    /// key-signed baseline (the `R-711` class) is future work.
-    pub fn verify_baseline(&self) -> rusqlite::Result<bool> {
+    /// RETURNS A STATE, NOT A BOOL, AND NOT A `Result` -- deliberately. A `Result<bool>` gave a
+    /// caller two ways to spell "safe" for a question that had not been answered, and both were
+    /// taken: `Ok(true)` on a missing digest here, `.unwrap_or(true)` on a database error there.
+    /// With `BaselineState` there is no `true` to fall back to, so a caller that ignores the
+    /// difference does not compile into something reassuring -- it does not compile.
+    ///
+    /// The doc comment this replaces also contradicted its own code: it claimed `Ok(false)` covered
+    /// a baseline that "predates digest support", while the body returned `Ok(true)` for exactly
+    /// that case. Whoever read the comment and trusted it was reading a promise the function did
+    /// not keep.
+    ///
+    /// NOTE, unchanged and still true: the digest lives in the same database, so this catches
+    /// corruption and naive tampering — not an attacker who also recomputes it. A key-signed
+    /// baseline (the `R-711` class) is future work, and `NoDigest` is a hint of why it matters.
+    pub fn verify_baseline(&self) -> BaselineState {
         let stored: Option<String> = self
             .conn
             .query_row("SELECT v FROM meta WHERE k = 'baseline_digest'", [], |r| {
@@ -170,16 +225,25 @@ impl Db {
             })
             .ok();
         let Some(stored) = stored else {
-            return Ok(true); // no digest recorded (legacy baseline) — don't cry wolf
+            return BaselineState::NoDigest;
         };
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path, hash, size, mode FROM baseline")?;
-        let rows: Vec<(String, String, i64, u32)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<rusqlite::Result<_>>()?;
+        let mut stmt = match self.conn.prepare("SELECT path, hash, size, mode FROM baseline") {
+            Ok(s) => s,
+            Err(e) => return BaselineState::Unreadable(e.to_string()),
+        };
+        let rows: rusqlite::Result<Vec<(String, String, i64, u32)>> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .and_then(|m| m.collect());
+        let rows = match rows {
+            Ok(r) => r,
+            Err(e) => return BaselineState::Unreadable(e.to_string()),
+        };
         let actual = Self::digest_rows(rows.iter().map(|(p, h, s, m)| (p, h, *s, *m)));
-        Ok(actual == stored)
+        if actual == stored {
+            BaselineState::Intact
+        } else {
+            BaselineState::Tampered
+        }
     }
 
     fn load_baseline(&self) -> rusqlite::Result<HashMap<String, String>> {
@@ -259,5 +323,108 @@ impl Db {
             Status::Ok => 4,
         });
         Ok((findings, sum))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// These are the first unit tests in this repository. Until now every check on this engine went
+    /// through the `--selftest` binary path, which can only run as a whole program and so could not
+    /// reach a single function -- and the defect these tests exist for lived in a single function.
+    fn entry(path: &str, hash: &str) -> Entry {
+        Entry {
+            path: path.to_string(),
+            hash: hash.to_string(),
+            size: 10,
+            mode: 0o644,
+            mtime: 1,
+        }
+    }
+
+    fn db_with_baseline(dir: &std::path::Path) -> Db {
+        let mut db = Db::open(&dir.join("t.db")).expect("open");
+        db.set_baseline(&[entry("/a", "aa"), entry("/b", "bb")])
+            .expect("set_baseline");
+        db
+    }
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        // Not `mktemp`: CLAUDE.md P-16 -- on macOS `mktemp -d` ignores TMPDIR unless given a
+        // template, and this only needs a unique directory, not a secure one.
+        let d = std::env::temp_dir().join(format!("eos-db-test-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).expect("mkdir");
+        d
+    }
+
+    #[test]
+    fn fresh_baseline_is_intact() {
+        let d = tmpdir("fresh");
+        let db = db_with_baseline(&d);
+        assert_eq!(db.verify_baseline(), BaselineState::Intact);
+    }
+
+    #[test]
+    fn edited_rows_are_tampered() {
+        let d = tmpdir("tampered");
+        let db = db_with_baseline(&d);
+        db.conn
+            .execute("UPDATE baseline SET hash = 'zz' WHERE path = '/a'", [])
+            .expect("tamper");
+        assert_eq!(db.verify_baseline(), BaselineState::Tampered);
+    }
+
+    /// THE REGRESSION TEST FOR THE DEFECT. Deleting one row -- the digest -- used to turn tamper
+    /// detection off permanently: `verify_baseline` returned `Ok(true)` and the window said the
+    /// baseline was intact. The cheapest attack on a digest stored beside its data is to remove the
+    /// digest, so "no digest" may not be spelled the same way as "verified intact".
+    #[test]
+    fn a_deleted_digest_is_not_intact() {
+        let d = tmpdir("nodigest");
+        let db = db_with_baseline(&d);
+        let n = db
+            .conn
+            .execute("DELETE FROM meta WHERE k = 'baseline_digest'", [])
+            .expect("delete digest");
+        assert_eq!(n, 1, "the digest row was not there to delete -- test is vacuous");
+        assert_eq!(db.verify_baseline(), BaselineState::NoDigest);
+        assert!(!db.verify_baseline().is_intact());
+    }
+
+    /// Without this, the test above would pass just as well if `verify_baseline` returned
+    /// `NoDigest` for EVERYTHING -- which would be a different, quieter defect.
+    #[test]
+    fn no_digest_is_not_the_answer_to_everything() {
+        let d = tmpdir("notalways");
+        let db = db_with_baseline(&d);
+        assert_ne!(db.verify_baseline(), BaselineState::NoDigest);
+    }
+
+    /// `digest_rows` sorts before hashing, so the same set in a different order is the same
+    /// baseline. If it stopped sorting, `verify_baseline` would report tampering on an untouched
+    /// store every time SQLite returned rows in another order.
+    #[test]
+    fn the_digest_does_not_depend_on_row_order() {
+        let a = ("/a".to_string(), "aa".to_string(), 1i64, 0o644u32);
+        let b = ("/b".to_string(), "bb".to_string(), 2i64, 0o600u32);
+        let one = Db::digest_rows([&a, &b].into_iter().map(|(p, h, s, m)| (p, h, *s, *m)));
+        let two = Db::digest_rows([&b, &a].into_iter().map(|(p, h, s, m)| (p, h, *s, *m)));
+        assert_eq!(one, two);
+    }
+
+    /// And it must still depend on the things it claims to cover. A digest that ignored `mode`
+    /// would let a file become setuid without the baseline noticing.
+    #[test]
+    fn the_digest_covers_mode_and_size() {
+        let base = ("/a".to_string(), "aa".to_string(), 1i64, 0o644u32);
+        let mode = ("/a".to_string(), "aa".to_string(), 1i64, 0o4755u32);
+        let size = ("/a".to_string(), "aa".to_string(), 999i64, 0o644u32);
+        let d = |t: &(String, String, i64, u32)| {
+            Db::digest_rows([t].into_iter().map(|(p, h, s, m)| (p, h, *s, *m)))
+        };
+        assert_ne!(d(&base), d(&mode), "digest ignores mode");
+        assert_ne!(d(&base), d(&size), "digest ignores size");
     }
 }
