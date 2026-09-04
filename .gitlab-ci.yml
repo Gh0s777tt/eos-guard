@@ -281,11 +281,17 @@ checks-heavy:
     - cargo test --locked --workspace
     - cargo llvm-cov clean --workspace
     - cargo llvm-cov --no-report --locked --workspace
-    # The second pass: the selftest binary, where the functional proof lives.
-    - cargo llvm-cov --no-report --locked --workspace run -- --selftest
+    # The second pass: the selftest binary, where the functional proof lives. No
+    # `--workspace` here: cargo-llvm-cov refuses it for `run` (measured on !6, exit 1),
+    # and `run` builds the root binary, which links the engine, so the engine's lines
+    # exercised by --selftest are still counted in the report below.
+    - cargo llvm-cov --no-report --locked run -- --selftest
     # NO FLOOR, deliberately. This repository has never declared one, and
     # inventing a number here would be a floor nobody agreed to. Section
     # 5.10 rule 1 cuts both ways: raising a floor is an ordinary commit,
     # but the FIRST floor is the owner's call. The number is reported so
     # that decision has something to stand on.
-    - cargo llvm-cov report --summary-only
+    # `--workspace` on the report as well: without it the summary lists the root
+    # package only. Measured on this tree: 44.05 % without, 77.39 % with -- the
+    # engine (db.rs 94.5 %, scan.rs 85.7 %, lib.rs 100 %) simply did not appear.
+    - cargo llvm-cov report --summary-only --workspace
