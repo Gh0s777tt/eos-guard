@@ -3,7 +3,7 @@
 //! `eos-guard --selftest`. Prints `GUARD-SELFTEST-OK` on success (asserted
 //! from the boot serial / CI).
 
-use crate::db::{BaselineState, Db, Status};
+use crate::db::{self, BaselineState, Db, ScopeState, Status};
 use crate::scan;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -38,7 +38,7 @@ pub fn run(db_path: &Path) -> Result<(), String> {
     if entries.len() != 3 {
         return Err(format!("expected 3 files, scanned {}", entries.len()));
     }
-    db.set_baseline(&entries)
+    db.set_baseline(&entries, &roots)
         .map_err(|e| format!("set_baseline: {e}"))?;
     if db.baseline_count().map_err(|e| format!("count: {e}"))? != 3 {
         return Err("baseline count != 3".into());
@@ -52,7 +52,9 @@ pub fn run(db_path: &Path) -> Result<(), String> {
 
     // A clean re-scan: no changes, but the audit must flag the setuid file.
     let (again, _) = scan::scan_roots(&roots, 10_000);
-    let (findings, sum) = db.diff(&again).map_err(|e| format!("diff clean: {e}"))?;
+    let (findings, sum) = db
+        .diff(&again, &roots)
+        .map_err(|e| format!("diff clean: {e}"))?;
     if sum.modified != 0 || sum.new != 0 || sum.removed != 0 {
         return Err(format!("clean re-scan shows changes: {sum:?}"));
     }
@@ -69,6 +71,62 @@ pub fn run(db_path: &Path) -> Result<(), String> {
     if !warn.path.ends_with("suid.bin") || !warn.detail.contains("setuid") {
         return Err(format!("wrong audit finding: {warn:?}"));
     }
+    if sum.out_of_scope != 0 {
+        return Err(format!(
+            "a scan over the baseline's own roots skipped {} files",
+            sum.out_of_scope
+        ));
+    }
+
+    // ── Scan scope ──────────────────────────────────────────────────────────────────────────
+    // Narrow the roots to the subdirectory, exactly as editing the field in the window does, and
+    // re-diff the UNTOUCHED tree. Before this change the two files above `sub/` came back
+    // USUNIĘTY -- "brak na dysku" -- for a tree the scan never opened; with real roots that is
+    // thousands of rows, and an integrity monitor nobody reads protects nobody.
+    let narrowed = vec![root.join("sub").to_string_lossy().into_owned()];
+    let (inner, _) = scan::scan_roots(&narrowed, 10_000);
+    if inner.len() != 1 {
+        return Err(format!(
+            "expected 1 file under sub/, scanned {}",
+            inner.len()
+        ));
+    }
+    let (findings, sum) = db
+        .diff(&inner, &narrowed)
+        .map_err(|e| format!("diff narrowed: {e}"))?;
+    if sum.removed != 0 {
+        return Err(format!(
+            "a narrowed scan reported {} removals it never looked for",
+            sum.removed
+        ));
+    }
+    if sum.out_of_scope != 2 {
+        return Err(format!(
+            "expected 2 baseline files out of scope, got {}",
+            sum.out_of_scope
+        ));
+    }
+    if let Some(f) = findings.iter().find(|f| f.status == Status::Removed) {
+        return Err(format!("a narrowed scan still listed a removal: {f:?}"));
+    }
+    // The scope has to be NAMED, not merely counted: the window must be able to say which root
+    // went missing, and it must say something at all.
+    match db.scope(&narrowed) {
+        ScopeState::Changed { ref dropped, .. } if dropped.len() == 1 && dropped[0] == roots[0] => {
+        }
+        other => return Err(format!("narrowed scan reported scope {other:?}")),
+    }
+    let note = db::scope_note(&db.scope(&narrowed), sum.out_of_scope)
+        .ok_or("a narrowed scan that skipped 2 files printed no scope note")?;
+    if !note.contains("NIE SPRAWDZONO") || !note.contains('2') {
+        return Err(format!("scope note says too little: {note}"));
+    }
+    // ...and the same scan over the baseline's own roots must say NOTHING. A warning on every
+    // scan is a warning nobody reads (CLAUDE.md §5.4: show when the check refuses AND when it
+    // does not).
+    if let Some(quiet) = db::scope_note(&db.scope(&roots), 0) {
+        return Err(format!("an unchanged scope still printed: {quiet}"));
+    }
 
     // Mutate one file, add one, remove one → MODIFIED + NEW + REMOVED
     // (the setuid file is unchanged, so it stays a WARN).
@@ -78,7 +136,7 @@ pub fn run(db_path: &Path) -> Result<(), String> {
 
     let (mutated, _) = scan::scan_roots(&roots, 10_000);
     let (findings, sum) = db
-        .diff(&mutated)
+        .diff(&mutated, &roots)
         .map_err(|e| format!("diff mutated: {e}"))?;
     if sum.modified != 1 {
         return Err(format!("expected 1 modified, got {}", sum.modified));
@@ -86,8 +144,16 @@ pub fn run(db_path: &Path) -> Result<(), String> {
     if sum.new != 1 {
         return Err(format!("expected 1 new, got {}", sum.new));
     }
+    // THE OTHER DIRECTION, and the reason the suppression above is not a blanket. Same roots as
+    // the baseline, one file genuinely deleted: it must still be reported.
     if sum.removed != 1 {
         return Err(format!("expected 1 removed, got {}", sum.removed));
+    }
+    if sum.out_of_scope != 0 {
+        return Err(format!(
+            "an unchanged root set put {} files out of scope",
+            sum.out_of_scope
+        ));
     }
     let modified = findings
         .iter()

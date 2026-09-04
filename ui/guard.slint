@@ -27,6 +27,11 @@ export component MainWindow inherits Window {
     in property <int> n-modified;
     in property <int> n-removed;
     in property <int> n-warn;
+    // Baseline files this scan never walked (its roots did not cover them). A COUNT, not a list:
+    // these used to arrive as one USUNIĘTY row each, which is the wall of false findings that
+    // teaches people to close the window. It is a chip rather than status-line-only text so a
+    // narrowed scan reads as a number, right beside the removals it is not.
+    in property <int> n-out-of-scope;
 
     callback baseline();
     callback scan();
@@ -77,6 +82,7 @@ export component MainWindow inherits Window {
                 { t: "Zmienione " + root.n-modified, c: #e50914 },
                 { t: "Usunięte " + root.n-removed, c: #b02a6a },
                 { t: "Ostrzeżenia " + root.n-warn, c: #d0902a },
+                { t: "Poza zakresem " + root.n-out-of-scope, c: #5f7a9a },
             ]: Rectangle {
                 background: chip.c.with-alpha(0.22);
                 border-color: chip.c;
