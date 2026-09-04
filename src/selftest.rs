@@ -3,7 +3,7 @@
 //! `eos-guard --selftest`. Prints `GUARD-SELFTEST-OK` on success (asserted
 //! from the boot serial / CI).
 
-use crate::db::{Db, Status};
+use crate::db::{BaselineState, Db, Status};
 use crate::scan;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -43,8 +43,11 @@ pub fn run(db_path: &Path) -> Result<(), String> {
     if db.baseline_count().map_err(|e| format!("count: {e}"))? != 3 {
         return Err("baseline count != 3".into());
     }
-    if !db.verify_baseline().map_err(|e| format!("verify: {e}"))? {
-        return Err("fresh baseline fails its own digest".into());
+    if !db.verify_baseline().is_intact() {
+        return Err(format!(
+            "fresh baseline is not intact: {:?}",
+            db.verify_baseline()
+        ));
     }
 
     // A clean re-scan: no changes, but the audit must flag the setuid file.
@@ -105,8 +108,32 @@ pub fn run(db_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("tamper: {e}"))?;
     }
     let db = Db::open(db_path).map_err(|e| format!("reopen: {e}"))?;
-    if db.verify_baseline().map_err(|e| format!("verify2: {e}"))? {
+    if db.verify_baseline().is_intact() {
         return Err("tampered baseline still passes its digest".into());
+    }
+    // THE ARM THIS SELFTEST NEVER HAD, and the one the defect lived in. The cheapest attack on a
+    // digest kept beside its data is to delete the digest -- ONE ROW -- and before this change that
+    // worked perfectly: `verify_baseline` answered `Ok(true)` and the window said the baseline was
+    // fine, permanently. Done with raw SQL rather than a helper on `Db`, because a shipped method
+    // that erases the integrity digest is a door, not a test fixture.
+    {
+        let conn =
+            rusqlite::Connection::open(db_path).map_err(|e| format!("reopen for digest: {e}"))?;
+        let n = conn
+            .execute("DELETE FROM meta WHERE k = 'baseline_digest'", [])
+            .map_err(|e| format!("delete digest: {e}"))?;
+        if n != 1 {
+            return Err(format!("expected to delete 1 digest row, deleted {n}"));
+        }
+    }
+    let db = Db::open(db_path).map_err(|e| format!("reopen after digest delete: {e}"))?;
+    match db.verify_baseline() {
+        BaselineState::NoDigest => {}
+        other => {
+            return Err(format!(
+                "a baseline whose digest row was deleted reported {other:?}, not NoDigest"
+            ))
+        }
     }
 
     let _ = fs::remove_dir_all(&root);

@@ -66,11 +66,16 @@ pub fn run() {
     {
         let app = app.borrow();
         let base_n = app.db.baseline_count().unwrap_or(0);
-        let intact = app.db.verify_baseline().unwrap_or(true);
+        // `.unwrap_or(true)` used to stand here: a database error was displayed as "intact".
+        // `verify_baseline` no longer returns anything that can be unwrapped into reassurance.
+        let state = app.db.verify_baseline();
         win.set_status(SharedString::from(if base_n == 0 {
             "Brak wzorca — kliknij „Ustaw wzorzec”.".to_string()
-        } else if !intact {
-            format!("⚠ Wzorzec ({base_n} plików) NARUSZONY — ustaw go ponownie.")
+        } else if !state.is_intact() {
+            format!(
+                "⚠ Wzorzec ({base_n} plików) {} — ustaw go ponownie.",
+                state.describe()
+            )
         } else {
             format!("Wzorzec: {base_n} plików. Kliknij Skanuj.")
         }));
@@ -123,7 +128,7 @@ pub fn run() {
             win.set_status(SharedString::from("Skanowanie…"));
             let (entries, truncated) = scan::scan_roots(&roots, SCAN_BUDGET);
             let app = app.borrow();
-            let intact = app.db.verify_baseline().unwrap_or(true);
+            let state = app.db.verify_baseline();
             match app.db.diff(&entries) {
                 Ok((findings, sum)) => {
                     let changed = sum.new + sum.modified + sum.removed + sum.warn;
@@ -137,10 +142,12 @@ pub fn run() {
                         } else {
                             ""
                         },
-                        if intact {
-                            ""
+                        // Same rule as the startup line: only `Intact` prints nothing. A
+                        // baseline with no digest, or one that could not be read, is news.
+                        if state.is_intact() {
+                            String::new()
                         } else {
-                            "  ⚠ WZORZEC NARUSZONY"
+                            format!("  ⚠ WZORZEC {}", state.describe())
                         }
                     )));
                 }
