@@ -80,6 +80,56 @@ The engine's unit tests run only with `cargo test --workspace` — at a workspac
 plain `cargo test` runs the root package alone (measured: 1 test instead of 26), which
 is why CI says `--workspace` on every test and coverage line.
 
+## Linie stanu zaufania
+
+Under the scan status the window shows three lines, one per sentence, read once at start
+by `src/sysstatus.rs` (product code, beside `paths.rs` — the engine crate stays ignorant
+of Redox paths). Each line reports **what one world-readable source says**, and nothing
+it does not:
+
+- **Szyfrowanie dysku (FDE)** reads `/scheme/sys/env`, the kernel's copy of the
+  bootloader environment. A `REDOXFS_PASSWORD_ADDR` *key* (never the value — it is a
+  physical address) means the bootloader unlocked the root with a password →
+  *aktywne*; `REDOXFS_UUID` without it → *⚠ NIEAKTYWNE*. `DISK_LIVE_ADDR` only appends
+  *(obraz live, root w RAM)*; it never changes the state or removes the warning.
+- **RAID-1** needs *two* signals: the `disk.raid1` scheme name under `/scheme` (raid1d
+  registers it only after assembling an array) **and** raid1d's own `/tmp/raid1d.state`
+  (`status = optimal|degraded`, `members = A/M`). Both present and consistent →
+  *sprawna* or *⚠ ZDEGRADOWANA*; both absent → *nie wykryto macierzy*. One without the
+  other is *nieznane*: `/tmp` is sticky-world-writable, so a planted state file with no
+  daemon behind it must not buy *sprawna*. The file must also be one only root could have
+  written — a regular file (no symlink), owned by uid 0, not writable by group or others,
+  no longer than raid1d writes (the read stops at 64 KiB) — else *nieznane* with the
+  reason: a file anyone could have replaced proves nothing, whatever it says.
+- **Repozytorium** reads pkg-lib's three files: the pinned key
+  `/etc/pkg/eos-repo-sign.pub.toml` (the `ed25519` field must decode to 32 bytes, else
+  *⚠ NIEPOPRAWNY*; missing → *⚠ NIEPODPISANE*, because pkg then accepts an unsigned
+  index), the sources under `/etc/pkg.d` (non-`#` lines; x86_64 ships a commented URL
+  only → *brak skonfigurowanego źródła*), and the serial watermark
+  `/etc/pkg/repo-state.toml` → *ostatni przyjęty indeks serial N*, or *brak znaku
+  wodnego serial* when absent, unparsable or `0` (pkg-lib never writes 0).
+
+**`nieznane` means exactly that.** A read error other than "file not found", a `pkg.d`
+entry that cannot be stat'ed (a dangling symlink, a directory without its search bit), a
+bootloader env without `REDOXFS_UUID`, a state file raid1d could not have written, a
+`pkg.d` line pkg itself refuses — each renders *nieznane* with its reason, never a
+definite state in either direction. On a development host all three lines read
+*nieznane*, which is the honest answer for a machine that is not E-OS.
+
+**What is NOT verified on the device, and the lines say so:**
+
+- **ML-DSA-65.** The key file carries a hybrid ed25519 + ML-DSA-65 public key, but pkg-lib
+  checks the ed25519 half only. The line reports whether the field is *present* (*w
+  kluczu, NIE sprawdzane na urządzeniu* / *brak w kluczu*), nothing more.
+- **`expires`.** No on-disk file carries it and no published index has it (`S-11`), so
+  the line does not mention it rather than print a caveat on every render.
+- **Live RAID state.** raid1d writes its file at assembly time and then enters a null
+  namespace, so a member dropping out mid-run is invisible until the next boot — hence
+  *stan z chwili rozruchu* on both definite variants.
+- **A live signature check.** The watermark is written by pkg-lib even without a pinned
+  key and is root-writable, so the repository line says *ostatni przyjęty indeks* and
+  never *podpisane*; that word waits for a verification the line does not perform.
+
 ## Headless self-test
 
 `eos-guard --selftest` proves the pipeline without a display: it builds a
@@ -98,6 +148,18 @@ coverage test either way turns the selftest red with the reason:
 ```text
 GUARD-SELFTEST-FAIL: a narrowed scan reported 2 removals it never looked for
 ```
+
+The three trust lines are proven the same way, from the producers' own formats (a
+bootloader env block, raid1d's state file, a pkg-lib sysroot built under `$TMPDIR`):
+every definite sentence has a fixture that earns it and a negative fixture that must not —
+the token inside a value, `status = healthy`, a 2-byte `ed25519`, `serial = 0`, a state
+file with no daemon behind it, a state file that is not root's or is writable by others, a
+directory in place of the key or the watermark file (a read error root cannot read
+through, so the control holds on a root CI runner too). The two real-path cases are
+guarded, so the same binary is a boot probe on the image (it prints the lines it read; the
+FDE line must be definite there, the RAID line may read *nieznane* in a restricted
+namespace) and a host check elsewhere (where both must read *nieznane*). It also calls `trust_lines()` itself and asserts three
+labelled lines in order, so the string the window sets is tested and not merely typed.
 
 ## Download
 

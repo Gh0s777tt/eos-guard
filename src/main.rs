@@ -16,6 +16,7 @@
 mod gui;
 mod paths;
 mod selftest;
+mod sysstatus;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

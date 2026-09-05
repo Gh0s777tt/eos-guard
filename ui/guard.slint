@@ -20,6 +20,10 @@ export component MainWindow inherits Window {
 
     in-out property <string> roots;
     in property <string> status;
+    // The three trust lines under the status (FDE / RAID-1 / repository), one per line,
+    // set once at start. Same colour and size family as the status; `⚠` marks the bad states
+    // exactly as `⚠ WZORZEC` and `⚠ ZAKRES:` do -- no chip, no new colour.
+    in property <string> trust-status;
     in property <bool> busy: false;
     in property <[Finding]> findings;
     in property <int> n-ok;
@@ -103,6 +107,12 @@ export component MainWindow inherits Window {
             text: root.status;
             color: #8a6f6f;
             font-size: 11px;
+        }
+        Text {
+            text: root.trust-status;
+            color: #8a6f6f;
+            font-size: 11px;
+            wrap: word-wrap;
         }
 
         // ── Findings ─────────────────────────────────────────────
