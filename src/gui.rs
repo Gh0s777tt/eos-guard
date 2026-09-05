@@ -2,6 +2,7 @@
 //! `--no-default-features` for the CLI/selftest half only).
 
 use crate::paths;
+use crate::sysstatus;
 use eos_fsintegrity::db::{self, Status};
 use eos_fsintegrity::{parse_roots, scan, DEFAULT_SCAN_BUDGET as SCAN_BUDGET};
 use slint::{ModelRc, SharedString, VecModel};
@@ -53,6 +54,9 @@ pub fn run() {
 
     let win = MainWindow::new().expect("eos-guard: cannot create the window");
     win.set_roots(SharedString::from("/usr/bin, /etc"));
+    // The three trust lines (FDE / RAID-1 / repository): three small reads, once, at start.
+    // `trust_lines` owns the order and the wording; the selftest proves the string, not this call.
+    win.set_trust_status(SharedString::from(sysstatus::trust_lines()));
     {
         let app = app.borrow();
         let base_n = app.db.baseline_count().unwrap_or(0);
